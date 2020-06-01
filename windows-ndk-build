@@ -1,0 +1,1040 @@
+# HG changeset patch
+# User Makoto Kato <m_kato@ga2.so-net.ne.jp>
+# Parent  fa1fe1088a5e415df857e6b0767442e0e9ceae25
+
+diff --git a/build.gradle b/build.gradle
+--- a/build.gradle
++++ b/build.gradle
+@@ -59,16 +59,17 @@ allprojects {
+         }
+     }
+ }
+ 
+ buildDir "${topobjdir}/gradle/build"
+ 
+ buildscript {
+     repositories {
++        google()
+         gradle.mozconfig.substs.GRADLE_MAVEN_REPOSITORIES.each { repository ->
+             maven {
+                 url repository
+             }
+         }
+     }
+ 
+     ext.kotlin_version = '1.3.41'
+@@ -79,17 +80,17 @@ buildscript {
+     if (gradle.mozconfig.substs.MOZ_ANDROID_GOOGLE_PLAY_SERVICES) {
+         ext.google_play_services_version = '15.0.1'
+         ext.google_play_services_cast_version = '16.0.0'
+         ext.google_play_services_fido_version = '17.0.0'
+     }
+ 
+     dependencies {
+         classpath 'org.mozilla.apilint:apilint:0.2.6'
+-        classpath 'com.android.tools.build:gradle:3.4.2'
++        classpath 'com.android.tools.build:gradle:3.5.0'
+         classpath 'com.getkeepsafe.dexcount:dexcount-gradle-plugin:0.8.2'
+         classpath 'org.apache.commons:commons-exec:1.3'
+         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+     }
+ }
+ 
+ // A stream that processes bytes line by line, prepending a tag before sending
+ // each line to Gradle's logging.
+diff --git a/build/autoconf/android.m4 b/build/autoconf/android.m4
+--- a/build/autoconf/android.m4
++++ b/build/autoconf/android.m4
+@@ -23,46 +23,23 @@ case "$target" in
+     ASFLAGS="$directory_include_args -DANDROID $ASFLAGS"
+ 
+     LDFLAGS="-L$android_platform/usr/lib -Wl,-rpath-link=$android_platform/usr/lib --sysroot=$android_platform $LDFLAGS"
+     ;;
+ esac
+ 
+ ])
+ 
+-AC_DEFUN([MOZ_ANDROID_CPU_ARCH],
+-[
+-
+-if test "$OS_TARGET" = "Android"; then
+-    case "${CPU_ARCH}" in
+-    arm)
+-        ANDROID_CPU_ARCH=armeabi-v7a
+-        ;;
+-    x86)
+-        ANDROID_CPU_ARCH=x86
+-        ;;
+-    x86_64)
+-        ANDROID_CPU_ARCH=x86_64
+-        ;;
+-    aarch64)
+-        ANDROID_CPU_ARCH=arm64-v8a
+-        ;;
+-    esac
+-
+-    AC_SUBST(ANDROID_CPU_ARCH)
+-fi
+-])
+-
+ AC_DEFUN([MOZ_ANDROID_STLPORT],
+ [
+ 
+ if test "$OS_TARGET" = "Android"; then
+     if test -z "$STLPORT_LIBS"; then
+         # android-ndk-r8b and later
+-        cxx_libs="$android_ndk/sources/cxx-stl/llvm-libc++/libs/$ANDROID_CPU_ARCH"
++        cxx_libs="$android_ndk/sources/cxx-stl/llvm-libc++/libs/$android_cpu_arch"
+         # NDK r12 removed the arm/thumb library split and just made
+         # everything thumb by default.  Attempt to compensate.
+         if test "$MOZ_THUMB2" = 1 -a -d "$cxx_libs/thumb"; then
+             cxx_libs="$cxx_libs/thumb"
+         fi
+ 
+         if ! test -e "$cxx_libs/libc++_static.a"; then
+             AC_MSG_ERROR([Couldn't find path to llvm-libc++ in the android ndk])
+diff --git a/build/autoconf/toolchain.m4 b/build/autoconf/toolchain.m4
+--- a/build/autoconf/toolchain.m4
++++ b/build/autoconf/toolchain.m4
+@@ -77,20 +77,18 @@ case "${TOOLCHAIN_PREFIX}" in
+     ;;
+ esac
+ AC_PROG_CC
+ AC_PROG_CXX
+ 
+ AC_CHECK_PROGS(RANLIB, "${TOOLCHAIN_PREFIX}ranlib", :)
+ AC_CHECK_PROGS(AS, "${TOOLCHAIN_PREFIX}as", :)
+ AC_CHECK_PROGS(LIPO, "${TOOLCHAIN_PREFIX}lipo", :)
+-AC_CHECK_PROGS(STRIP, "${TOOLCHAIN_PREFIX}strip", :)
+ AC_CHECK_PROGS(OTOOL, "${TOOLCHAIN_PREFIX}otool", :)
+ AC_CHECK_PROGS(INSTALL_NAME_TOOL, "${TOOLCHAIN_PREFIX}install_name_tool", :)
+-AC_CHECK_PROGS(OBJCOPY, "${TOOLCHAIN_PREFIX}objcopy", :)
+ PATH=$_SAVE_PATH
+ ])
+ 
+ AC_DEFUN([MOZ_CXX11],
+ [
+ dnl Updates to the test below should be duplicated further below for the
+ dnl cross-compiling case.
+ AC_LANG_CPLUSPLUS
+diff --git a/build/moz.configure/toolchain.configure b/build/moz.configure/toolchain.configure
+--- a/build/moz.configure/toolchain.configure
++++ b/build/moz.configure/toolchain.configure
+@@ -1404,22 +1404,22 @@ def preprocess_option(compiler):
+     else:
+         return '-P -Fi'
+ 
+ 
+ set_config('PREPROCESS_OPTION', preprocess_option)
+ 
+ 
+ # We only want to include windows.configure when we are compiling on
+-# Windows, for Windows.
++# Windows, or for Windows.
+ 
+ 
+ @depends(target, host)
+ def is_windows(target, host):
+-    return host.kernel == 'WINNT' and target.kernel == 'WINNT'
++    return host.kernel == 'WINNT' or target.kernel == 'WINNT'
+ 
+ 
+ include('windows.configure', when=is_windows)
+ 
+ 
+ # On Power ISA, determine compiler flags for VMX, VSX and VSX-3.
+ 
+ set_config('PPC_VMX_FLAGS',
+@@ -2380,22 +2380,32 @@ set_config('MKCSHLIB', make_shared_libra
+ @depends(c_compiler, toolchain_prefix, when=target_is_windows)
+ def rc_names(c_compiler, toolchain_prefix):
+     if c_compiler.type in ('gcc', 'clang'):
+         return tuple('%s%s' % (p, 'windres')
+                      for p in ('',) + (toolchain_prefix or ()))
+     return ('rc',)
+ 
+ 
+-check_prog('RC', rc_names, paths=sdk_bin_path)
+-
+-
+-@depends(link, toolchain_prefix)
+-def ar_config(link, toolchain_prefix):
+-    if link:  # if LINKER is set, it's either for lld-link or link
++check_prog('RC', rc_names, paths=sdk_bin_path, when=target_is_windows)
++
++
++@template
++def host_binutils_tools_config(command):
++    @depends(toolchain_prefix)
++    def tools_config(toolchain_prefix):
++        return tuple('%s%s' % (p, command)
++                   for p in (toolchain_prefix or ()) + ('',))
++
++    return tools_config
++
++
++@depends(link, c_compiler, toolchain_prefix)
++def ar_config(link, compiler, toolchain_prefix):
++    if compiler == 'clang-cl' and link:  # if LINKER is set, it's either for lld-link or link
+         if 'lld-link' in link:
+             return namespace(
+                 names=('llvm-lib',),
+                 flags=('-llvmlibthin', '-out:$@'),
+             )
+         else:
+             return namespace(
+                 names=('lib',),
+@@ -2408,8 +2418,24 @@ def ar_config(link, toolchain_prefix):
+     )
+ 
+ 
+ ar = check_prog('AR', ar_config.names, paths=toolchain_search_path)
+ 
+ add_old_configure_assignment('AR', ar)
+ 
+ set_config('AR_FLAGS', ar_config.flags)
++
++
++js_option(env='STRIP', nargs=1, help='Path to the strip', when=target_is_unix)
++
++strip = check_prog('STRIP', host_binutils_tools_config('strip'),
++                   input='STRIP', paths=toolchain_search_path,
++                   allow_missing=True, when=target_is_unix)
++
++add_old_configure_assignment('STRIP', strip)
++
++js_option(env='OBJCOPY', nargs=1, help='Path to the objcopy',
++          when=target_is_linux)
++
++objcopy = check_prog('OBJCOPY', host_binutils_tools_config('objcopy'),
++                     input='OBJCOPY', paths=toolchain_search_path,
++                     allow_missing=True, when=target_is_linux)
+diff --git a/build/moz.configure/windows.configure b/build/moz.configure/windows.configure
+--- a/build/moz.configure/windows.configure
++++ b/build/moz.configure/windows.configure
+@@ -20,25 +20,24 @@ def valid_windows_version(value):
+             return version
+     except ValueError:
+         pass
+ 
+     die('Invalid value for --with-windows-version (%s)', value[0])
+ 
+ 
+ option(env='WINDOWSSDKDIR', nargs=1,
+-       help='Directory containing the Windows SDK')
++       help='Directory containing the Windows SDK',
++       when=host_is_windows)
+ 
+ 
+-@depends('WINDOWSSDKDIR', host)
+-def windows_sdk_dir(value, host):
++@depends('WINDOWSSDKDIR', when=host_is_windows)
++def windows_sdk_dir(value):
+     if value:
+         return value
+-    if host.kernel != 'WINNT':
+-        return ()
+ 
+     return set(x[1] for x in get_registry_values(
+         r'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows Kits\Installed Roots'
+         r'\KitsRoot*', get_32_and_64_bit=True))
+ 
+ # The Windows SDK 8.1 and 10 have different layouts. The former has
+ # $SDK/include/$subdir, while the latter has $SDK/include/$version/$subdir.
+ # The vcvars* scripts don't actually care about the version, they just take
+@@ -89,17 +88,18 @@ def get_sdk_dirs(sdk, subdir):
+ 
+ 
+ @imports(_from='mozbuild.shellutil', _import='quote')
+ def valid_windows_sdk_dir_result(value):
+     if value:
+         return '0x%04x in %s' % (value.version, quote(value.path))
+ 
+ 
+-@depends(c_compiler, windows_sdk_dir, valid_windows_version, 'WINDOWSSDKDIR')
++@depends(c_compiler, windows_sdk_dir, valid_windows_version, 'WINDOWSSDKDIR',
++         when=host_is_windows)
+ @checking('for Windows SDK', valid_windows_sdk_dir_result)
+ @imports(_from='__builtin__', _import='sorted')
+ @imports(_from='__builtin__', _import='Exception')
+ @imports(_from='textwrap', _import='dedent')
+ def valid_windows_sdk_dir(compiler, windows_sdk_dir, target_version,
+                           windows_sdk_dir_env):
+     if windows_sdk_dir_env:
+         windows_sdk_dir_env = windows_sdk_dir_env[0]
+@@ -158,17 +158,17 @@ def valid_windows_sdk_dir(compiler, wind
+ 
+ 
+ @imports(_from='mozbuild.shellutil', _import='quote')
+ def valid_ucrt_sdk_dir_result(value):
+     if value:
+         return '%s in %s' % (value.version, quote(value.path))
+ 
+ 
+-@depends(windows_sdk_dir, 'WINDOWSSDKDIR')
++@depends(windows_sdk_dir, 'WINDOWSSDKDIR', when=host_is_windows)
+ @checking('for Universal CRT SDK', valid_ucrt_sdk_dir_result)
+ @imports('os')
+ @imports(_from='__builtin__', _import='sorted')
+ @imports(_import='mozpack.path', _as='mozpath')
+ def valid_ucrt_sdk_dir(windows_sdk_dir, windows_sdk_dir_env):
+     if windows_sdk_dir_env:
+         windows_sdk_dir_env = windows_sdk_dir_env[0]
+     sdks = {}
+@@ -231,20 +231,20 @@ def valid_ucrt_sdk_dir(windows_sdk_dir, 
+     return namespace(
+         path=sdk.path,
+         include=sdk.include,
+         lib=sdk.lib,
+         version=version,
+     )
+ 
+ 
+-@depends(c_compiler, toolchain_search_path)
++@depends(c_compiler, host_c_compiler, toolchain_search_path)
+ @imports('os')
+-def vc_path(c_compiler, toolchain_search_path):
+-    if c_compiler.type != 'clang-cl':
++def vc_path(c_compiler, host_c_compiler, toolchain_search_path):
++    if c_compiler.type != 'clang-cl' and host_c_compiler.type != 'clang-cl':
+         return
+ 
+     # In clang-cl builds, we need the headers and libraries from an MSVC installation.
+     vc_program = find_program('cl.exe', paths=toolchain_search_path)
+     if not vc_program:
+         die('Cannot find a Visual C++ install for e.g. ATL headers.')
+ 
+     result = os.path.dirname(vc_program)
+@@ -270,16 +270,18 @@ def dia_sdk_dir(vc_path, dia_sdk_path):
+     if dia_sdk_path:
+         path = os.path.normpath(dia_sdk_path[0])
+ 
+     elif vc_path:
+         # This would be easier if we had the installationPath that
+         # get_vc_paths works with, since 'DIA SDK' is relative to that.
+         path = os.path.normpath(os.path.join(
+             vc_path, r'..\..\..\..\DIA SDK'))
++    else:
++        return
+ 
+     if os.path.exists(os.path.join(path, 'include', 'dia2.h')):
+         return path
+ 
+ 
+ @depends(vc_path, valid_windows_sdk_dir, valid_ucrt_sdk_dir, dia_sdk_dir)
+ @imports('os')
+ def include_path(vc_path, windows_sdk_dir, ucrt_sdk_dir, dia_sdk_dir):
+@@ -380,53 +382,54 @@ def lib_path_for(host_or_target):
+         ))
+         if dia_sdk_lib_dir:
+             libs.append(dia_sdk_lib_dir)
+         return libs
+ 
+     return lib_path
+ 
+ 
+-@depends(lib_path_for(target))
++@depends_if(lib_path_for(target))
+ @imports('os')
+ def lib_path(libs):
+     # Set in the environment for old-configure
+     libs = os.pathsep.join(libs)
+     os.environ['LIB'] = libs
+     return libs
+ 
+ 
+ set_config('LIB', lib_path)
+ 
+ 
+ lib_path_for_host = lib_path_for(host)
+ 
+-@depends(lib_path_for_host)
++@depends_if(lib_path_for_host)
+ @imports(_from='mozbuild.shellutil', _import='quote')
+ def host_linker_libpaths(libs):
+     return ['-LIBPATH:%s' % quote(l) for l in libs]
+ 
+ 
+-@depends(lib_path_for_host)
++@depends_if(lib_path_for_host)
+ @imports(_from='mozbuild.shellutil', _import='quote')
+ def host_linker_libpaths_bat(libs):
+     # .bat files need a different style of quoting. Batch quoting is actually
+     # not defined, and up to applications to handle, so it's not really clear
+     # what should be escaped and what not, but most paths should work just
+     # fine without escaping. And we don't care about double-quotes possibly
+     # having to be escaped because they're not allowed in file names on
+     # Windows.
+     return ['"-LIBPATH:%s"' % l for l in libs]
+ 
+ 
+ set_config('HOST_LINKER_LIBPATHS', host_linker_libpaths)
+ set_config('HOST_LINKER_LIBPATHS_BAT', host_linker_libpaths_bat)
+ 
+ 
+-option(env='MT', nargs=1, help='Path to the Microsoft Manifest Tool')
++option(env='MT', nargs=1, help='Path to the Microsoft Manifest Tool',
++       when=host_is_windows)
+ 
+ 
+ @depends(valid_windows_sdk_dir, valid_ucrt_sdk_dir)
+ @imports(_from='os', _import='environ')
+ @imports('platform')
+ def sdk_bin_path(valid_windows_sdk_dir, valid_ucrt_sdk_dir):
+     if not valid_windows_sdk_dir:
+         return
+@@ -444,18 +447,19 @@ def sdk_bin_path(valid_windows_sdk_dir, 
+         os.path.join(valid_windows_sdk_dir.path, versioned_bin, vc_host)
+     ]
+     if vc_host == 'x64':
+         result.append(
+             os.path.join(valid_windows_sdk_dir.path, versioned_bin, 'x86'))
+     return result
+ 
+ 
++# Linux host (mingw-clang) have no mt
+ mt = check_prog('MT', ('mt.exe',), input='MT',
+-                paths=sdk_bin_path)
++                paths=sdk_bin_path, when=host_is_windows)
+ 
+ 
+ # Check that MT is not something unexpected like "magnetic tape manipulation
+ # utility".
+ @depends(mt)
+ @checking('whether MT is really Microsoft Manifest Tool', lambda x: bool(x))
+ def valid_mt(path):
+     out = check_cmd_output(path, onerror=lambda: '').splitlines()
+@@ -476,9 +480,10 @@ link = check_prog('LINKER', ('lld-link',
+ js_option(env='HOST_LINKER', nargs=1, help='Path to the host linker')
+ 
+ host_link = check_prog('HOST_LINKER', ('lld-link',), input='HOST_LINKER',
+                        paths=host_toolchain_search_path)
+ 
+ add_old_configure_assignment('LINKER', link)
+ 
+ 
+-check_prog('MAKECAB', ('makecab.exe',))
++# Linux host (mingw-clang) have no makecab
++check_prog('MAKECAB', ('makecab.exe',), when=host_is_windows)
+diff --git a/gradle/wrapper/gradle-wrapper.properties b/gradle/wrapper/gradle-wrapper.properties
+--- a/gradle/wrapper/gradle-wrapper.properties
++++ b/gradle/wrapper/gradle-wrapper.properties
+@@ -1,7 +1,6 @@
+-#Fri Sep 16 15:41:50 PDT 2016
++#Wed Aug 28 09:51:22 JST 2019
+ distributionBase=GRADLE_USER_HOME
+ distributionPath=wrapper/dists
+ zipStoreBase=GRADLE_USER_HOME
+ zipStorePath=wrapper/dists
+-distributionUrl=https\://services.gradle.org/distributions/gradle-5.1.1-all.zip
+-distributionSha256Sum=53b71812f18cdb2777e9f1b2a0f2038683907c90bdc406bc64d8b400e1fb2c3b
++distributionUrl=https\://services.gradle.org/distributions/gradle-5.4.1-all.zip
+diff --git a/js/src/old-configure.in b/js/src/old-configure.in
+--- a/js/src/old-configure.in
++++ b/js/src/old-configure.in
+@@ -100,17 +100,16 @@ if test "$COMPILE_ENVIRONMENT"; then
+ #       different platform than $host, so it would not be used by Mozilla.
+ if test "$target" != "$host"; then
+     MOZ_CROSS_COMPILER
+ else
+     AC_PROG_CC
+     AC_PROG_CXX
+     AC_PROG_RANLIB
+     MOZ_PATH_PROGS(AS, $AS as, $CC)
+-    AC_CHECK_PROGS(STRIP, strip, :)
+ fi
+ 
+ MOZ_TOOL_VARIABLES
+ 
+ dnl Special win32 checks
+ dnl ========================================================
+ 
+ # Target the Windows 8.1 SDK by default
+@@ -293,18 +292,16 @@ MOZ_FIX_LINK_PATHS="-Wl,-rpath-link,${DI
+ 
+ dnl Configure platform-specific CPU architecture compiler options.
+ dnl ==============================================================
+ MOZ_ARCH_OPTS
+ 
+ dnl ========================================================
+ dnl Android libstdc++
+ dnl ========================================================
+-
+-MOZ_ANDROID_CPU_ARCH
+ MOZ_ANDROID_STLPORT
+ 
+ dnl ========================================================
+ dnl Suppress Clang Argument Warnings
+ dnl ========================================================
+ WARNINGS_CFLAGS="$_WARNINGS_CFLAGS"
+ if test -n "${CLANG_CC}${CLANG_CL}"; then
+     WARNINGS_CFLAGS="-Qunused-arguments $WARNINGS_CFLAGS"
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/GeckoEditable.java b/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/GeckoEditable.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/GeckoEditable.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/GeckoEditable.java
+@@ -55,17 +55,17 @@ import android.view.inputmethod.EditorIn
+  * SpannableStringBuilder/Editable that contains our text.
+  */
+ /* package */ final class GeckoEditable
+     extends IGeckoEditableParent.Stub
+     implements InvocationHandler,
+                Editable,
+                SessionTextInput.EditableClient {
+ 
+-    private static final boolean DEBUG = false;
++    private static final boolean DEBUG = true;
+     private static final String LOGTAG = "GeckoEditable";
+ 
+     // Filters to implement Editable's filtering functionality
+     private InputFilter[] mFilters;
+ 
+     /**
+      * We need a WeakReference here to avoid unnecessary
+      * retention of the GeckoSession. Passing objects around
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/SessionTextInput.java b/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/SessionTextInput.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/SessionTextInput.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/SessionTextInput.java
+@@ -41,17 +41,17 @@ import org.mozilla.gecko.util.ThreadUtil
+  * For full functionality, {@code SessionTextInput} requires a {@link android.view.View} to be set
+  * first through {@link #setView}. When a {@link android.view.View} is not set or set to null,
+  * {@code SessionTextInput} will operate in a reduced functionality mode. See {@link
+  * #onCreateInputConnection} and methods in {@link GeckoSession.TextInputDelegate} for changes in
+  * behavior in this viewless mode.
+  */
+ public final class SessionTextInput {
+     /* package */ static final String LOGTAG = "GeckoSessionTextInput";
+-    private static final boolean DEBUG = false;
++    private static final boolean DEBUG = true;
+ 
+     // Interface to access GeckoInputConnection from SessionTextInput.
+     /* package */ interface InputConnectionClient {
+         View getView();
+         Handler getHandler(Handler defHandler);
+         InputConnection onCreateInputConnection(EditorInfo attrs);
+     }
+ 
+diff --git a/mobile/android/geckoview_example/src/main/java/org/mozilla/geckoview_example/GeckoViewActivity.java b/mobile/android/geckoview_example/src/main/java/org/mozilla/geckoview_example/GeckoViewActivity.java
+--- a/mobile/android/geckoview_example/src/main/java/org/mozilla/geckoview_example/GeckoViewActivity.java
++++ b/mobile/android/geckoview_example/src/main/java/org/mozilla/geckoview_example/GeckoViewActivity.java
+@@ -115,17 +115,21 @@ public class GeckoViewActivity extends A
+ 
+     private ProgressBar mProgressView;
+ 
+     private LinkedList<GeckoSession.WebResponseInfo> mPendingDownloads = new LinkedList<>();
+ 
+     private LocationView.CommitListener mCommitListener = new LocationView.CommitListener() {
+         @Override
+         public void onCommit(String text) {
+-            if ((text.contains(".") || text.contains(":")) && !text.contains(" ")) {
++            if (text.startsWith("data:")) {
++                // Since loadUri always content principal, data: URI isn't allowed.
++                // To use data: URI, LOAD_FLAGS_FORCE_ALLOW_DATA_URI is required.
++                mTabSessionManager.getCurrentSession().loadUri(text, GeckoSession.LOAD_FLAGS_FORCE_ALLOW_DATA_URI);
++            } else if ((text.contains(".") || text.contains(":")) && !text.contains(" ")) {
+                 mTabSessionManager.getCurrentSession().loadUri(text);
+             } else {
+                 mTabSessionManager.getCurrentSession().loadUri(SEARCH_URI_BASE + text);
+             }
+             mGeckoView.requestFocus();
+         }
+     };
+ 
+diff --git a/mobile/android/moz.configure b/mobile/android/moz.configure
+--- a/mobile/android/moz.configure
++++ b/mobile/android/moz.configure
+@@ -45,8 +45,25 @@ include('../../build/moz.configure/java.
+ include('gradle.configure')
+ 
+ # Automation will set this via the TC environment.
+ option(env='MOZ_ANDROID_FAT_AAR_ARCHITECTURES',
+        nargs='*', choices=('armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'),
+        help='Comma-separated list of Android CPU architectures like "armeabi-v7a,arm64-v8a,x86,x86_64"')
+ 
+ set_config('MOZ_ANDROID_FAT_AAR_ARCHITECTURES', depends('MOZ_ANDROID_FAT_AAR_ARCHITECTURES')(lambda x: x))
++
++
++@depends(target)
++def android_cpu_arch(target):
++    cpu_arch = {
++        'arm': 'armeabi-v7a',
++        'aarch64': 'arm64-v8a',
++        'x86': 'x86',
++        'x86_64': 'x86_64'
++    }.get(target.cpu)
++    if cpu_arch is None:
++        die('Unsupported cpu: %s', target.cpu)
++    return cpu_arch
++
++
++add_old_configure_assignment('android_cpu_arch', android_cpu_arch)
++set_config('ANDROID_CPU_ARCH', android_cpu_arch)
+diff --git a/old-configure.in b/old-configure.in
+--- a/old-configure.in
++++ b/old-configure.in
+@@ -77,31 +77,22 @@ MOZ_USE_PTHREADS=
+ 
+ LDFLAGS="$LDFLAGS $LINKER_LDFLAGS"
+ 
+ if test "$COMPILE_ENVIRONMENT"; then
+     MOZ_ANDROID_NDK
+ fi # COMPILE_ENVIRONMENT
+ 
+ case "$target" in
+-*-android*|*-linuxandroid*)
+-    ;;
+-*-linux*)
+-    AC_PATH_PROG(OBJCOPY,objcopy)
+-    ;;
+-esac
+-
+-case "$target" in
+ *-apple-darwin*)
+     MOZ_IOS_SDK
+     ;;
+ esac
+ 
+ AC_SUBST(ANDROID_PACKAGE_NAME)
+-AC_SUBST(OBJCOPY)
+ 
+ dnl ========================================================
+ dnl Checks for compilers.
+ dnl ========================================================
+ 
+ if test "$COMPILE_ENVIRONMENT"; then
+ 
+ if test "$target" != "$host"; then
+@@ -111,17 +102,16 @@ else
+     case "$target" in
+     *-mingw*)
+       # Work around the conftest.exe access problem on Windows
+       sleep 2
+     esac
+     AC_PROG_CXX
+     AC_PROG_RANLIB
+     MOZ_PATH_PROGS(AS, $AS as, $CC)
+-    AC_CHECK_PROGS(STRIP, strip, :)
+     AC_CHECK_PROGS(OTOOL, otool, :)
+ fi
+ 
+ if test -n "$MOZ_WINCONSOLE"; then
+     AC_DEFINE(MOZ_WINCONSOLE)
+ fi
+ 
+ MOZ_TOOL_VARIABLES
+@@ -280,18 +270,16 @@ dnl Configure platform-specific CPU arch
+ dnl ==============================================================
+ if test "$COMPILE_ENVIRONMENT"; then
+     MOZ_ARCH_OPTS
+ fi # COMPILE_ENVIRONMENT
+ 
+ dnl ========================================================
+ dnl Android libstdc++
+ dnl ========================================================
+-
+-MOZ_ANDROID_CPU_ARCH
+ if test "$COMPILE_ENVIRONMENT"; then
+     MOZ_ANDROID_STLPORT
+ fi # COMPILE_ENVIRONMENT
+ 
+ dnl ========================================================
+ dnl Suppress Clang Argument Warnings
+ dnl ========================================================
+ WARNINGS_CFLAGS="$_WARNINGS_CFLAGS"
+@@ -491,33 +479,33 @@ if test "$MOZ_DMD"; then
+     fi
+ fi
+ 
+ dnl ========================================================
+ dnl System overrides of the defaults for host
+ dnl ========================================================
+ case "$host" in
+ *mingw*)
+-    if test -n "$_WIN32_MSVC"; then
++    if test "$HOST_CC_TYPE" = "clang-cl"; then
+         HOST_CFLAGS="$HOST_CFLAGS -nologo"
+     else
+         HOST_CFLAGS="$HOST_CFLAGS -mwindows"
+     fi
+     HOST_CFLAGS="$HOST_CFLAGS -DXP_WIN -DWIN32 -D_WIN32 -D_CRT_SECURE_NO_WARNINGS"
+     HOST_OPTIMIZE_FLAGS="${HOST_OPTIMIZE_FLAGS=-O2}"
+     HOST_BIN_SUFFIX=.exe
+ 
+     case "${host_cpu}" in
+     i*86)
+-        if test -n "$_WIN32_MSVC"; then
++        if test "$HOST_CC_TYPE" = "clang-cl"; then
+             HOST_LDFLAGS="$HOST_LDFLAGS -MACHINE:X86"
+         fi
+         ;;
+     x86_64)
+-        if test -n "$_WIN32_MSVC"; then
++        if test "$HOST_CC_TYPE" = "clang-cl"; then
+             HOST_LDFLAGS="$HOST_LDFLAGS -MACHINE:X64"
+         fi
+         HOST_CFLAGS="$HOST_CFLAGS -D_AMD64_"
+         ;;
+     esac
+     ;;
+ 
+ *-darwin*)
+@@ -662,17 +650,16 @@ case "$target" in
+         WIN32_CONSOLE_EXE_LDFLAGS=-mconsole
+         WIN32_GUI_EXE_LDFLAGS=-mwindows
+ 
+         # Silence problematic clang warnings
+         CXXFLAGS="$CXXFLAGS -Wno-incompatible-ms-struct"
+     else
+         TARGET_COMPILER_ABI=msvc
+         RANLIB='echo not_ranlib'
+-        STRIP='echo not_strip'
+         PKG_SKIP_STRIP=1
+         # aarch64 doesn't support subsystems below 6.02
+         if test "$CPU_ARCH" = "aarch64"; then
+             WIN32_SUBSYSTEM_VERSION=6.02
+         else
+             WIN32_SUBSYSTEM_VERSION=6.01
+         fi
+         WIN32_CONSOLE_EXE_LDFLAGS=-SUBSYSTEM:CONSOLE,$WIN32_SUBSYSTEM_VERSION
+diff --git a/python/mozboot/mozboot/mozillabuild.py b/python/mozboot/mozboot/mozillabuild.py
+--- a/python/mozboot/mozboot/mozillabuild.py
++++ b/python/mozboot/mozboot/mozillabuild.py
+@@ -62,17 +62,17 @@ class MozillaBuildBootstrapper(BaseBoots
+ 
+     def install_browser_packages(self):
+         pass
+ 
+     def install_browser_artifact_mode_packages(self):
+         pass
+ 
+     def install_mobile_android_packages(self):
+-        pass
++        self.ensure_mobile_android_packages()
+ 
+     def install_mobile_android_artifact_mode_packages(self):
+         self.ensure_mobile_android_packages(artifact_mode=True)
+ 
+     def ensure_mobile_android_packages(self, artifact_mode=False):
+         # Get java path from registry key
+         import _winreg
+ 
+diff --git a/python/mozbuild/mozbuild/mozinfo.py b/python/mozbuild/mozbuild/mozinfo.py
+--- a/python/mozbuild/mozbuild/mozinfo.py
++++ b/python/mozbuild/mozbuild/mozinfo.py
+@@ -86,16 +86,17 @@ def build_dict(config, env=os.environ):
+     d['stylo'] = True
+     d['asan'] = substs.get('MOZ_ASAN') == '1'
+     d['tsan'] = substs.get('MOZ_TSAN') == '1'
+     d['ubsan'] = substs.get('MOZ_UBSAN') == '1'
+     d['xbl'] = substs.get('MOZ_XBL') == '1'
+     d['telemetry'] = substs.get('MOZ_TELEMETRY_REPORTING') == '1'
+     d['tests_enabled'] = substs.get('ENABLE_TESTS') == "1"
+     d['bin_suffix'] = substs.get('BIN_SUFFIX', '')
++    d['host_bin_suffix'] = substs.get('HOST_BIN_SUFFIX', '')
+     d['require_signing'] = substs.get('MOZ_REQUIRE_SIGNING') == '1'
+     d['allow_legacy_extensions'] = substs.get('MOZ_ALLOW_LEGACY_EXTENSIONS') == '1'
+     d['official'] = bool(substs.get('MOZILLA_OFFICIAL'))
+     d['updater'] = substs.get('MOZ_UPDATER') == '1'
+     d['artifact'] = substs.get('MOZ_ARTIFACT_BUILDS') == '1'
+     d['ccov'] = substs.get('MOZ_CODE_COVERAGE') == '1'
+     d['cc_type'] = substs.get('CC_TYPE')
+ 
+diff --git a/testing/mochitest/mach_commands.py b/testing/mochitest/mach_commands.py
+--- a/testing/mochitest/mach_commands.py
++++ b/testing/mochitest/mach_commands.py
+@@ -5,16 +5,17 @@
+ from __future__ import absolute_import, unicode_literals
+ 
+ from argparse import Namespace
+ from collections import defaultdict
+ import logging
+ import os
+ import sys
+ import warnings
++import mozinfo
+ 
+ from mozbuild.base import (
+     MachCommandBase,
+     MachCommandConditions as conditions,
+     MozbuildObject,
+ )
+ 
+ from mach.decorators import (
+@@ -268,24 +269,25 @@ def is_buildapp_in(*apps):
+     is_buildapp_supported.__doc__ = 'Must have a {} build.'.format(
+         ' or '.join(apps))
+     return is_buildapp_supported
+ 
+ 
+ def verify_host_bin():
+     # validate MOZ_HOST_BIN environment variables for Android tests
+     MOZ_HOST_BIN = os.environ.get('MOZ_HOST_BIN')
++    bin_suffix = mozinfo.info.get('host_bin_suffix', '')
+     if not MOZ_HOST_BIN:
+         print('environment variable MOZ_HOST_BIN must be set to a directory containing host '
+               'xpcshell')
+         return 1
+     elif not os.path.isdir(MOZ_HOST_BIN):
+         print('$MOZ_HOST_BIN does not specify a directory')
+         return 1
+-    elif not os.path.isfile(os.path.join(MOZ_HOST_BIN, 'xpcshell')):
++    elif not os.path.isfile(os.path.join(MOZ_HOST_BIN, 'xpcshell' + bin_suffix)):
+         print('$MOZ_HOST_BIN/xpcshell does not exist')
+         return 1
+     return 0
+ 
+ 
+ @CommandProvider
+ class MachCommands(MachCommandBase):
+     @Command('mochitest', category='testing',
+diff --git a/testing/mochitest/runjunit.py b/testing/mochitest/runjunit.py
+--- a/testing/mochitest/runjunit.py
++++ b/testing/mochitest/runjunit.py
+@@ -78,20 +78,17 @@ class JUnitTestRunner(MochitestDesktop):
+            Additional initialization required to satisfy MochitestDesktop.startServers
+         """
+         self._locations = None
+         self.server = None
+         self.wsserver = None
+         self.websocketProcessBridge = None
+         self.SERVER_STARTUP_TIMEOUT = 180 if mozinfo.info.get('debug') else 90
+         if self.options.remoteWebServer is None:
+-            if os.name != "nt":
+-                self.options.remoteWebServer = moznetwork.get_ip()
+-            else:
+-                raise Exception("--remote-webserver must be specified")
++            self.options.remoteWebServer = moznetwork.get_ip()
+         self.options.webServer = self.options.remoteWebServer
+         self.options.webSocketPort = '9988'
+         self.options.httpdPath = None
+         self.options.keep_open = False
+         self.options.pidFile = ""
+         self.options.subsuite = None
+         self.options.xrePath = None
+         if build_obj and 'MOZ_HOST_BIN' in os.environ:
+diff --git a/testing/mochitest/runtests.py b/testing/mochitest/runtests.py
+--- a/testing/mochitest/runtests.py
++++ b/testing/mochitest/runtests.py
+@@ -671,17 +671,17 @@ class SSLTunnel:
+             for loc in locations:
+                 if loc.scheme == "https" and "nocert" not in loc.options:
+                     self.writeLocation(config, loc)
+ 
+     def start(self):
+         """ Starts the SSL Tunnel """
+ 
+         # start ssltunnel to provide https:// URLs capability
+-        bin_suffix = mozinfo.info.get('bin_suffix', '')
++        bin_suffix = mozinfo.info.get('host_bin_suffix', '')
+         ssltunnel = os.path.join(self.utilityPath, "ssltunnel" + bin_suffix)
+         if not os.path.exists(ssltunnel):
+             self.log.error(
+                 "INFO | runtests.py | expected to find ssltunnel at %s" %
+                 ssltunnel)
+             exit(1)
+ 
+         env = test_environment(xrePath=self.xrePath, log=self.log)
+diff --git a/testing/mozbase/mozdevice/mozdevice/adb.py b/testing/mozbase/mozdevice/mozdevice/adb.py
+--- a/testing/mozbase/mozdevice/mozdevice/adb.py
++++ b/testing/mozbase/mozdevice/mozdevice/adb.py
+@@ -24,17 +24,17 @@ from . import version_codes
+ 
+ class ADBProcess(object):
+     """ADBProcess encapsulates the data related to executing the adb process."""
+ 
+     def __init__(self, args):
+         #: command argument argument list.
+         self.args = args
+         #: Temporary file handle to be used for stdout.
+-        self.stdout_file = tempfile.NamedTemporaryFile(mode='w+b')
++        self.stdout_file = tempfile.NamedTemporaryFile(mode='w+b', delete=False)
+         #: boolean indicating if the command timed out.
+         self.timedout = None
+         #: exitcode of the process.
+         self.exitcode = None
+         #: subprocess Process object used to execute the command.
+         self.proc = subprocess.Popen(args,
+                                      stdout=self.stdout_file,
+                                      stderr=subprocess.STDOUT)
+@@ -329,16 +329,17 @@ class ADBCommand(object):
+                                     adb_process.timedout,
+                                     adb_process.exitcode,
+                                     output))
+ 
+             return output
+         finally:
+             if adb_process and isinstance(adb_process.stdout_file, io.IOBase):
+                 adb_process.stdout_file.close()
++                #remove(stdout_file)
+ 
+ 
+ class ADBHost(ADBCommand):
+     """ADBHost provides a basic interface to adb host commands
+     which do not target a specific device.
+ 
+     ::
+ 
+diff --git a/testing/mozbase/mozrunner/mozrunner/devices/android_device.py b/testing/mozbase/mozrunner/mozrunner/devices/android_device.py
+--- a/testing/mozbase/mozrunner/mozrunner/devices/android_device.py
++++ b/testing/mozbase/mozrunner/mozrunner/devices/android_device.py
+@@ -14,27 +14,30 @@ import subprocess
+ import sys
+ import telnetlib
+ import time
+ from distutils.spawn import find_executable
+ 
+ import psutil
+ from mozdevice import ADBHost, ADBDevice
+ from six.moves import input, urllib
++import mozinfo
+ 
+ EMULATOR_HOME_DIR = os.path.join(os.path.expanduser('~'), '.mozbuild', 'android-device')
+ 
+ EMULATOR_AUTH_FILE = os.path.join(os.path.expanduser('~'), '.emulator_console_auth_token')
+ 
+ TOOLTOOL_PATH = 'testing/mozharness/external_tools/tooltool.py'
+ 
+ TRY_URL = 'https://hg.mozilla.org/try/raw-file/default'
+ 
+ MANIFEST_PATH = 'testing/config/tooltool-manifests'
+ 
++XPCSHELL = 'xpcshell' + mozinfo.info.get('host_bin_suffix', '')
++
+ verbose_logging = False
+ devices = {}
+ 
+ 
+ class AvdInfo(object):
+     """
+        Simple class to contain an AVD description.
+     """
+@@ -96,17 +99,17 @@ def _install_host_utils(build_obj):
+     host_platform = _get_host_platform()
+     if host_platform:
+         path = os.path.join(MANIFEST_PATH, host_platform, 'hostutils.manifest')
+         _get_tooltool_manifest(build_obj.substs, path, EMULATOR_HOME_DIR,
+                                'releng.manifest')
+         _tooltool_fetch(build_obj.substs)
+         xre_path = glob.glob(os.path.join(EMULATOR_HOME_DIR, 'host-utils*'))
+         for path in xre_path:
+-            if os.path.isdir(path) and os.path.isfile(os.path.join(path, 'xpcshell')):
++            if os.path.isdir(path) and os.path.isfile(os.path.join(path, XPCSHELL)):
+                 os.environ['MOZ_HOST_BIN'] = path
+                 installed = True
+                 break
+         if not installed:
+             _log_warning("Unable to install host utilities.")
+     else:
+         _log_warning(
+             "Unable to install host utilities -- your platform is not supported!")
+@@ -117,17 +120,17 @@ def _maybe_update_host_utils(build_obj):
+        Compare the installed host-utils to the version name in the manifest;
+        if the installed version is older, offer to update.
+     """
+ 
+     # Determine existing/installed version
+     existing_path = None
+     xre_paths = glob.glob(os.path.join(EMULATOR_HOME_DIR, 'host-utils*'))
+     for path in xre_paths:
+-        if os.path.isdir(path) and os.path.isfile(os.path.join(path, 'xpcshell')):
++        if os.path.isdir(path) and os.path.isfile(os.path.join(path, XPCSHELL)):
+             existing_path = path
+             break
+     if existing_path is None:
+         # if not installed, no need to upgrade (new version will be installed)
+         return
+     existing_version = os.path.basename(existing_path)
+ 
+     # Determine manifest version
+@@ -273,23 +276,23 @@ def verify_android_device(build_obj, ins
+         # prompt to install one.
+         xre_path = os.environ.get('MOZ_HOST_BIN')
+         err = None
+         if not xre_path:
+             err = "environment variable MOZ_HOST_BIN is not set to a directory " \
+                   "containing host xpcshell"
+         elif not os.path.isdir(xre_path):
+             err = '$MOZ_HOST_BIN does not specify a directory'
+-        elif not os.path.isfile(os.path.join(xre_path, 'xpcshell')):
++        elif not os.path.isfile(os.path.join(xre_path, XPCSHELL)):
+             err = '$MOZ_HOST_BIN/xpcshell does not exist'
+         if err:
+             _maybe_update_host_utils(build_obj)
+             xre_path = glob.glob(os.path.join(EMULATOR_HOME_DIR, 'host-utils*'))
+             for path in xre_path:
+-                if os.path.isdir(path) and os.path.isfile(os.path.join(path, 'xpcshell')):
++                if os.path.isdir(path) and os.path.isfile(os.path.join(path, XPCSHELL)):
+                     os.environ['MOZ_HOST_BIN'] = path
+                     err = None
+                     break
+         if err:
+             _log_info("Host utilities not found: %s" % err)
+             response = input(
+                 "Download and setup your host utilities? (Y/n) ").strip()
+             if response.lower().startswith('y') or response == '':
+diff --git a/testing/testsuite-targets.mk b/testing/testsuite-targets.mk
+--- a/testing/testsuite-targets.mk
++++ b/testing/testsuite-targets.mk
+@@ -53,17 +53,17 @@ reftest:
+ 	$(CHECK_TEST_ERROR)
+ 
+ reftest-remote: TEST_PATH?=layout/reftests/reftest.list
+ reftest-remote:
+ 	@if [ '${MOZ_HOST_BIN}' = '' ]; then \
+         echo 'environment variable MOZ_HOST_BIN must be set to a directory containing host xpcshell'; \
+     elif [ ! -d ${MOZ_HOST_BIN} ]; then \
+         echo 'MOZ_HOST_BIN does not specify a directory'; \
+-    elif [ ! -f ${MOZ_HOST_BIN}/xpcshell ]; then \
++    elif [ ! -f ${MOZ_HOST_BIN}/xpcshell$(HOST_BIN_SUFFIX) ]; then \
+         echo 'xpcshell not found in MOZ_HOST_BIN'; \
+     else \
+         ln -s $(abspath $(topsrcdir)) _tests/reftest/tests; \
+         $(call REMOTE_REFTEST,'tests/$(TEST_PATH)'); \
+         $(CHECK_TEST_ERROR); \
+     fi
+ 
+ crashtest: TEST_PATH?=testing/crashtest/crashtests.list
+@@ -190,22 +190,20 @@ stage-mach: make-stage-dir
+ 	cp $(topsrcdir)/mach $(PKG_STAGE)
+ 
+ stage-mochitest: make-stage-dir ;
+ 
+ stage-jstests: make-stage-dir
+ 	$(MAKE) -C $(DEPTH)/js/src/tests stage-package
+ 
+ ifdef OBJCOPY
+-ifneq ($(OBJCOPY), :) # see build/autoconf/toolchain.m4:102 for why this is necessary
+ ifndef PKG_SKIP_STRIP
+ STRIP_COMPILED_TESTS := 1
+ endif
+ endif
+-endif
+ 
+ stage-gtest: make-stage-dir
+ 	$(NSINSTALL) -D $(PKG_STAGE)/gtest/gtest_bin/gtest
+ ifdef STRIP_COMPILED_TESTS
+ # The libxul file basename will vary per platform. Fortunately
+ # dependentlibs.list always lists the library name as its final line, so we
+ # can get the value from there.
+ 	LIBXUL_BASE=`tail -1 $(DIST)/bin/dependentlibs.list` && \
+diff --git a/widget/android/GeckoEditableSupport.cpp b/widget/android/GeckoEditableSupport.cpp
+--- a/widget/android/GeckoEditableSupport.cpp
++++ b/widget/android/GeckoEditableSupport.cpp
+@@ -20,16 +20,18 @@
+ #include "mozilla/TextEvents.h"
+ #include "mozilla/ToString.h"
+ #include "mozilla/dom/BrowserChild.h"
+ 
+ #include <android/api-level.h>
+ #include <android/input.h>
+ #include <android/log.h>
+ 
++#define DEBUG_ANDROID_IME 1
++
+ #ifdef DEBUG_ANDROID_IME
+ #  define ALOGIME(args...) \
+     __android_log_print(ANDROID_LOG_INFO, "GeckoEditableSupport", ##args)
+ #else
+ #  define ALOGIME(args...) \
+     do {                   \
+     } while (0)
+ #endif

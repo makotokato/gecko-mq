@@ -1,0 +1,351 @@
+commit a6051cea4d05a7fdfa352a888768477483d0e980
+Author: Makoto Kato <m_kato@ga2.so-net.ne.jp>
+Date:   Thu Feb 6 19:07:08 2020 +0900
+
+    Add Windows system spellchecker.
+
+diff --git a/extensions/spellcheck/moz.build b/extensions/spellcheck/moz.build
+index 14ade001ff01..9b146bc0c1ac 100644
+--- a/extensions/spellcheck/moz.build
++++ b/extensions/spellcheck/moz.build
+@@ -6,6 +6,9 @@
+ 
+ DIRS += ['idl', 'locales', 'hunspell', 'src']
+ 
++if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'windows':
++    DIRS += ['windows']
++
+ MOCHITEST_CHROME_MANIFESTS += ['tests/chrome/chrome.ini']
+ MOCHITEST_MANIFESTS += ['tests/mochitest/mochitest.ini']
+ 
+diff --git a/extensions/spellcheck/src/moz.build b/extensions/spellcheck/src/moz.build
+index 1fa03d1c566b..ca54edbce561 100644
+--- a/extensions/spellcheck/src/moz.build
++++ b/extensions/spellcheck/src/moz.build
+@@ -24,6 +24,10 @@ LOCAL_INCLUDES += [
+     '../hunspell/src',
+     '/dom/base',
+ ]
++
++if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'windows':
++    LOCAL_INCLUDES += ['../windows']
++
+ EXPORTS.mozilla += [
+      'mozInlineSpellChecker.h',
+      'mozSpellChecker.h',
+diff --git a/extensions/spellcheck/src/mozSpellChecker.cpp b/extensions/spellcheck/src/mozSpellChecker.cpp
+index f3ccb1a90a7c..24e8f61c3cc6 100644
+--- a/extensions/spellcheck/src/mozSpellChecker.cpp
++++ b/extensions/spellcheck/src/mozSpellChecker.cpp
+@@ -10,11 +10,16 @@
+ #include "nsISimpleEnumerator.h"
+ #include "mozEnglishWordUtils.h"
+ #include "mozilla/dom/ContentChild.h"
++#include "mozilla/Preferences.h"
+ #include "mozilla/PRemoteSpellcheckEngineChild.h"
+ #include "mozilla/TextServicesDocument.h"
+ #include "nsXULAppAPI.h"
+ #include "RemoteSpellCheckEngineChild.h"
+ 
++#ifdef XP_WIN
++#  include "WindowsSpellChecker.h"
++#endif
++
+ using mozilla::GenericPromise;
+ using mozilla::PRemoteSpellcheckEngineChild;
+ using mozilla::RemoteSpellcheckEngineChild;
+@@ -542,6 +547,13 @@ nsresult mozSpellChecker::GetEngineList(
+     }
+   }
+ 
++#ifdef XP_WIN
++  if (mozilla::Preferences::GetBool("extensions.spellcheck.system.enabled", true)) {
++    aSpellCheckingEngines->AppendObject(
++        mozilla::WindowsSpellChecker::GetInstance());
++  }
++#endif
++
+   // Try to load HunSpell spellchecker engine.
+   nsCOMPtr<mozISpellCheckingEngine> engine =
+       do_GetService(DEFAULT_SPELL_CHECKER, &rv);
+diff --git a/extensions/spellcheck/windows/WindowsSpellChecker.cpp b/extensions/spellcheck/windows/WindowsSpellChecker.cpp
+new file mode 100644
+index 000000000000..c5ed076b5ba7
+--- /dev/null
++++ b/extensions/spellcheck/windows/WindowsSpellChecker.cpp
+@@ -0,0 +1,210 @@
++/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#undef NTDDI_VERSION
++#define NTDDI_VERSION NTDDI_WIN8
++
++#include "WindowsSpellChecker.h"
++#include "mozilla/ClearOnShutdown.h"
++#include "nsReadableUtils.h"
++#include "nsString.h"
++#include "nsXULAppAPI.h"
++
++#include <spellcheck.h>
++
++using namespace mozilla;
++
++namespace mozilla {
++
++StaticRefPtr<WindowsSpellChecker> WindowsSpellChecker::sSingleton;
++
++NS_IMPL_CYCLE_COLLECTING_ADDREF(WindowsSpellChecker)
++NS_IMPL_CYCLE_COLLECTING_RELEASE(WindowsSpellChecker)
++
++NS_INTERFACE_MAP_BEGIN(WindowsSpellChecker)
++  NS_INTERFACE_MAP_ENTRY(mozISpellCheckingEngine)
++  NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, mozISpellCheckingEngine)
++  NS_INTERFACE_MAP_ENTRIES_CYCLE_COLLECTION(WindowsSpellChecker)
++NS_INTERFACE_MAP_END
++
++NS_IMPL_CYCLE_COLLECTION(WindowsSpellChecker, mPersonalDictionary)
++
++// static
++WindowsSpellChecker* WindowsSpellChecker::GetInstance() {
++  if (XRE_GetProcessType() != GeckoProcessType_Default) {
++    return nullptr;
++  }
++
++  if (!sSingleton) {
++    RefPtr<WindowsSpellChecker> spellChecker = new WindowsSpellChecker();
++    sSingleton = spellChecker;
++    ClearOnShutdown(&sSingleton);
++  }
++  return sSingleton;
++}
++
++WindowsSpellChecker::~WindowsSpellChecker() {
++  if (mSpellChecker) {
++    mSpellChecker->Release();
++  }
++}
++
++NS_IMETHODIMP
++WindowsSpellChecker::GetDictionary(nsAString& aDictionary) {
++  aDictionary = mDictionary;
++  return NS_OK;
++}
++
++static already_AddRefed<ISpellCheckerFactory> GetSpellCheckerFactory() {
++  RefPtr<ISpellCheckerFactory> spellCheckerFactory;
++  CoCreateInstance(__uuidof(SpellCheckerFactory), nullptr, CLSCTX_INPROC_SERVER,
++                   IID_PPV_ARGS(static_cast<ISpellCheckerFactory**>(
++                       getter_AddRefs(spellCheckerFactory))));
++  return spellCheckerFactory.forget();
++}
++
++NS_IMETHODIMP
++WindowsSpellChecker::SetDictionary(const nsAString& aDictionary) {
++  if (mSpellChecker) {
++    mSpellChecker->Release();
++    mSpellChecker = nullptr;
++  }
++
++  if (aDictionary.IsEmpty()) {
++    mDictionary.Truncate();
++    return NS_OK;
++  }
++
++  RefPtr<ISpellCheckerFactory> spellCheckerFactory = GetSpellCheckerFactory();
++  if (NS_WARN_IF(!spellCheckerFactory)) {
++    return NS_ERROR_NOT_AVAILABLE;
++  }
++  BOOL isSupported = FALSE;
++  spellCheckerFactory->IsSupported(PromiseFlatString(aDictionary).get(),
++                                   &isSupported);
++  if (NS_WARN_IF(!isSupported)) {
++    return NS_ERROR_FILE_NOT_FOUND;
++  }
++
++  HRESULT hr = spellCheckerFactory->CreateSpellChecker(
++      PromiseFlatString(aDictionary).get(), &mSpellChecker);
++  if (NS_WARN_IF(FAILED(hr))) {
++    return NS_ERROR_FAILURE;
++  }
++  mDictionary = aDictionary;
++  return NS_OK;
++}
++
++NS_IMETHODIMP WindowsSpellChecker::GetPersonalDictionary(
++    mozIPersonalDictionary** aPersonalDictionary) {
++  *aPersonalDictionary = mPersonalDictionary;
++  NS_IF_ADDREF(*aPersonalDictionary);
++  return NS_OK;
++}
++
++NS_IMETHODIMP WindowsSpellChecker::SetPersonalDictionary(
++    mozIPersonalDictionary* aPersonalDictionary) {
++  mPersonalDictionary = aPersonalDictionary;
++  return NS_OK;
++}
++
++NS_IMETHODIMP WindowsSpellChecker::GetDictionaryList(
++    nsTArray<nsString>& aDictionaries) {
++  RefPtr<ISpellCheckerFactory> spellCheckerFactory = GetSpellCheckerFactory();
++  if (NS_WARN_IF(!spellCheckerFactory)) {
++    return NS_ERROR_NOT_AVAILABLE;
++  }
++  RefPtr<IEnumString> values;
++  HRESULT hr =
++      spellCheckerFactory->get_SupportedLanguages(getter_AddRefs(values));
++  if (NS_WARN_IF(FAILED(hr))) {
++    return NS_ERROR_NOT_AVAILABLE;
++  }
++
++  LPOLESTR str;
++  while (values->Next(1, &str, nullptr) == S_OK) {
++    aDictionaries.AppendElement(nsDependentString(str));
++    CoTaskMemFree(str);
++  }
++
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++WindowsSpellChecker::Check(const nsAString& aWord, bool* aResult) {
++  *aResult = false;
++  if (NS_WARN_IF(!mSpellChecker)) {
++    return NS_ERROR_NOT_INITIALIZED;
++  }
++
++  RefPtr<IEnumSpellingError> enumSpellingError;
++  HRESULT hr = mSpellChecker->Check(PromiseFlatString(aWord).get(),
++                                    getter_AddRefs(enumSpellingError));
++  if (NS_WARN_IF(FAILED(hr))) {
++    return NS_ERROR_FAILURE;
++  }
++
++  RefPtr<ISpellingError> spellingError;
++  if (enumSpellingError->Next(getter_AddRefs(spellingError)) == S_FALSE) {
++    *aResult = true;
++    return NS_OK;
++  }
++
++  if (!mPersonalDictionary) {
++    return NS_OK;
++  }
++
++  return mPersonalDictionary->Check(aWord, aResult);
++}
++
++NS_IMETHODIMP
++WindowsSpellChecker::Suggest(const nsAString& aWord,
++                             nsTArray<nsString>& aSuggestions) {
++  if (NS_WARN_IF(!mSpellChecker)) {
++    return NS_ERROR_NOT_INITIALIZED;
++  }
++  RefPtr<IEnumString> suggestString;
++  HRESULT hr = mSpellChecker->Suggest(PromiseFlatString(aWord).get(),
++                                      getter_AddRefs(suggestString));
++  if (NS_WARN_IF(FAILED(hr))) {
++    return NS_ERROR_FAILURE;
++  }
++  if (hr == S_FALSE) {
++    return NS_OK;
++  }
++
++  LPOLESTR str;
++  while (suggestString->Next(1, &str, nullptr) == S_OK) {
++    aSuggestions.AppendElement(nsDependentString(str));
++    CoTaskMemFree(str);
++  }
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++WindowsSpellChecker::LoadDictionariesFromDir(nsIFile* aDir) {
++  return NS_ERROR_NOT_IMPLEMENTED;
++}
++
++NS_IMETHODIMP WindowsSpellChecker::AddDirectory(nsIFile* aDir) {
++  return NS_ERROR_NOT_IMPLEMENTED;
++}
++
++NS_IMETHODIMP WindowsSpellChecker::RemoveDirectory(nsIFile* aDir) {
++  return NS_ERROR_NOT_IMPLEMENTED;
++}
++
++NS_IMETHODIMP WindowsSpellChecker::AddDictionary(const nsAString& aLang,
++                                                 nsIURI* aFile) {
++  return NS_ERROR_NOT_IMPLEMENTED;
++}
++
++NS_IMETHODIMP WindowsSpellChecker::RemoveDictionary(const nsAString& aLang,
++                                                    nsIURI* aFile,
++                                                    bool* aRetVal) {
++  return NS_ERROR_NOT_IMPLEMENTED;
++}
++
++}  // namespace mozilla
+diff --git a/extensions/spellcheck/windows/WindowsSpellChecker.h b/extensions/spellcheck/windows/WindowsSpellChecker.h
+new file mode 100644
+index 000000000000..db8c0ba9267a
+--- /dev/null
++++ b/extensions/spellcheck/windows/WindowsSpellChecker.h
+@@ -0,0 +1,42 @@
++/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_WindowsSpellChecker_h__
++#define mozilla_WindowsSpellChecker_h__
++
++#include "mozilla/StaticPtr.h"
++#include "mozIPersonalDictionary.h"
++#include "mozISpellCheckingEngine.h"
++#include "nsCOMPtr.h"
++#include "nsCycleCollectionParticipant.h"
++#include "nsString.h"
++
++class ISpellChecker;
++
++namespace mozilla {
++
++class WindowsSpellChecker final : public mozISpellCheckingEngine {
++ public:
++  NS_DECL_CYCLE_COLLECTING_ISUPPORTS
++  NS_DECL_MOZISPELLCHECKINGENGINE
++  NS_DECL_CYCLE_COLLECTION_CLASS_AMBIGUOUS(WindowsSpellChecker,
++                                           mozISpellCheckingEngine)
++
++  WindowsSpellChecker() : mSpellChecker(nullptr) {}
++
++  static WindowsSpellChecker* GetInstance();
++
++ protected:
++  virtual ~WindowsSpellChecker();
++
++  ISpellChecker* mSpellChecker;
++  nsCOMPtr<mozIPersonalDictionary> mPersonalDictionary;
++  nsString mDictionary;
++  static StaticRefPtr<WindowsSpellChecker> sSingleton;
++};
++
++}  // namespace mozilla
++
++#endif
+diff --git a/extensions/spellcheck/windows/moz.build b/extensions/spellcheck/windows/moz.build
+new file mode 100644
+index 000000000000..910f8aa395a8
+--- /dev/null
++++ b/extensions/spellcheck/windows/moz.build
+@@ -0,0 +1,11 @@
++# -*- Mode: python; indent-tabs-mode: nil; tab-width: 40 -*-
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++UNIFIED_SOURCES += [
++    'WindowsSpellChecker.cpp',
++]
++
++FINAL_LIBRARY = 'xul'
