@@ -1,6 +1,6 @@
 # HG changeset patch
 # User Makoto Kato <m_kato@ga2.so-net.ne.jp>
-# Parent  9f3fcb6752b4e36779e395abef8362f0b0d14e7b
+# Parent  725180017480c46f17faddc71ee35dcca39db109
 
 diff --git a/build/moz.configure/windows.configure b/build/moz.configure/windows.configure
 --- a/build/moz.configure/windows.configure
@@ -166,6 +166,25 @@ diff --git a/build/moz.configure/windows.configure b/build/moz.configure/windows
      includes = []
      include_env = os.environ.get('INCLUDE')
      if include_env:
+@@ -362,16 +373,18 @@ set_config('WIN_DIA_SDK_BIN_DIR', dia_sd
+ @template
+ def lib_path_for(host_or_target):
+     @depends(host_or_target, dependable(host_or_target is host), vc_path,
+              valid_windows_sdk_dir, valid_ucrt_sdk_dir, dia_sdk_subdir(host_or_target, 'lib'))
+     @imports('os')
+     def lib_path(target, is_host, vc_path, windows_sdk_dir, ucrt_sdk_dir, dia_sdk_lib_dir):
+         if not vc_path:
+             return
++        if target.kernel != 'WINNT':
++            return
+         sdk_target = {
+             'x86': 'x86',
+             'x86_64': 'x64',
+             'arm': 'arm',
+             'aarch64': 'arm64',
+         }.get(target.cpu)
+ 
+         # MSVC2017 switched to use the same target naming as the sdk.
 diff --git a/testing/mochitest/mochitest_options.py b/testing/mochitest/mochitest_options.py
 --- a/testing/mochitest/mochitest_options.py
 +++ b/testing/mochitest/mochitest_options.py
