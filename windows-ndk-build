@@ -1,130 +1,114 @@
 # HG changeset patch
 # User Makoto Kato <m_kato@ga2.so-net.ne.jp>
-# Parent  725180017480c46f17faddc71ee35dcca39db109
+# Parent  84480987c9a7f832986085c71b0fd0a71955c9f2
 
 diff --git a/build/moz.configure/windows.configure b/build/moz.configure/windows.configure
 --- a/build/moz.configure/windows.configure
 +++ b/build/moz.configure/windows.configure
-@@ -19,27 +19,35 @@ def valid_windows_version(value):
+@@ -23,26 +23,34 @@ def valid_windows_version(value):
          if version in (0x603,):
              return version
      except ValueError:
          pass
  
-     die('Invalid value for --with-windows-version (%s)', value[0])
+     die("Invalid value for --with-windows-version (%s)", value[0])
  
  
 +@depends(c_compiler, host_c_compiler)
-+def use_windows_sdk(compiler, host_compiler):
++def is_windows_sdk_required(compiler, host_compiler):
 +    # Ideally, we'd actually check for host/target ABI being MSVC, but
 +    # that's waiting for bug 1617793.
 +    if compiler.type == 'clang-cl' or host_compiler.type == 'clang-cl':
 +        return True
 +
 +
- option(env='WINDOWSSDKDIR', nargs=1,
-        help='Directory containing the Windows SDK')
+ option(env="WINDOWSSDKDIR", nargs=1, help="Directory containing the Windows SDK")
  
  
--@depends('WINDOWSSDKDIR', host, c_compiler)
+-@depends("WINDOWSSDKDIR", host, c_compiler)
 -def windows_sdk_dir(value, host, compiler):
-+@depends('WINDOWSSDKDIR', host, use_windows_sdk)
-+def windows_sdk_dir(value, host, use_windows_sdk):
++@depends('WINDOWSSDKDIR', host, is_windows_sdk_required)
++def windows_sdk_dir(value, host, is_windows_sdk_required):
      if value:
          return value
      # Ideally, we'd actually check for host/target ABI being MSVC, but
      # that's waiting for bug 1617793.
--    if host.kernel != 'WINNT' or compiler.type != 'clang-cl':
-+    if host.kernel != 'WINNT' or not use_windows_sdk:
+-    if host.kernel != "WINNT" or compiler.type != "clang-cl":
++    if host.kernel != "WINNT" or not is_windows_sdk_required:
          return ()
  
-     return set(x[1] for x in get_registry_values(
-         r'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows Kits\Installed Roots'
-         r'\KitsRoot*', get_32_and_64_bit=True))
+     return set(
+         x[1]
+         for x in get_registry_values(
+             r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows Kits\Installed Roots"
+             r"\KitsRoot*",
+             get_32_and_64_bit=True,
+@@ -104,28 +112,32 @@ def get_sdk_dirs(sdk, subdir):
  
- # The Windows SDK 8.1 and 10 have different layouts. The former has
- # $SDK/include/$subdir, while the latter has $SDK/include/$version/$subdir.
-@@ -91,41 +99,45 @@ def get_sdk_dirs(sdk, subdir):
  
- 
- @imports(_from='mozbuild.shellutil', _import='quote')
+ @imports(_from="mozbuild.shellutil", _import="quote")
  def valid_windows_sdk_dir_result(value):
      if value:
-         return '0x%04x in %s' % (value.version, quote(value.path))
+         return "0x%04x in %s" % (value.version, quote(value.path))
  
  
--@depends(c_compiler, windows_sdk_dir, valid_windows_version, 'WINDOWSSDKDIR')
+-@depends(c_compiler, windows_sdk_dir, valid_windows_version, "WINDOWSSDKDIR")
 +@depends(c_compiler, host_c_compiler, windows_sdk_dir, valid_windows_version, 'WINDOWSSDKDIR')
- @checking('for Windows SDK', valid_windows_sdk_dir_result)
- @imports(_from='__builtin__', _import='sorted')
- @imports(_from='__builtin__', _import='Exception')
- @imports(_from='textwrap', _import='dedent')
--def valid_windows_sdk_dir(compiler, windows_sdk_dir, target_version,
-+def valid_windows_sdk_dir(compiler, host_compiler, windows_sdk_dir, target_version,
-                           windows_sdk_dir_env):
+ @checking("for Windows SDK", valid_windows_sdk_dir_result)
+ @imports(_from="__builtin__", _import="sorted")
+ @imports(_from="__builtin__", _import="Exception")
+ @imports(_from="textwrap", _import="dedent")
+ def valid_windows_sdk_dir(
+-    compiler, windows_sdk_dir, target_version, windows_sdk_dir_env
++    target_compiler, host_compiler, windows_sdk_dir, target_version, windows_sdk_dir_env
+ ):
      # Ideally, we'd actually check for host/target ABI being MSVC, but
      # that's waiting for bug 1617793.
--    if compiler.type != 'clang-cl':
-+    if compiler.type != 'clang-cl' and host_compiler.type != 'clang-cl':
+-    if compiler.type != "clang-cl":
++    if target_compiler.type != 'clang-cl' and host_compiler.type != 'clang-cl':
          return None
-+    test_compiler = compiler
-+    if test_compiler != 'clang-cl':
-+        test_compiler = host_compiler
++    compiler = target_compiler
++    if compiler != 'clang-cl':
++        compiler = host_compiler
 +
      if windows_sdk_dir_env:
          windows_sdk_dir_env = windows_sdk_dir_env[0]
      sdks = {}
      for d in windows_sdk_dir:
-         sdk = get_sdk_dirs(d, 'um')
+         sdk = get_sdk_dirs(d, "um")
          if sdk:
-             check = dedent('''\
-             #include <winsdkver.h>
-             WINVER_MAXVER
-             ''')
-             um_dir = os.path.join(sdk.include, 'um')
-             shared_dir = os.path.join(sdk.include, 'shared')
--            result = try_preprocess(compiler.wrapper + [compiler.compiler] +
--                                    compiler.flags +
-+            result = try_preprocess(test_compiler.wrapper + [test_compiler.compiler] +
-+                                    test_compiler.flags +
-                                     ['-X', '-I', um_dir, '-I', shared_dir], 'C',
-                                     check, onerror=lambda: '')
-             if result:
-                 maxver = result.splitlines()[-1]
-                 try:
-                     maxver = int(maxver, 0)
-                 except Exception:
-                     pass
-@@ -164,25 +176,25 @@ def valid_windows_sdk_dir(compiler, wind
+             check = dedent(
+                 """\
+@@ -188,25 +200,25 @@ def valid_windows_sdk_dir(
  
  
- @imports(_from='mozbuild.shellutil', _import='quote')
+ @imports(_from="mozbuild.shellutil", _import="quote")
  def valid_ucrt_sdk_dir_result(value):
      if value:
-         return '%s in %s' % (value.version, quote(value.path))
+         return "%s in %s" % (value.version, quote(value.path))
  
  
--@depends(windows_sdk_dir, 'WINDOWSSDKDIR', c_compiler)
-+@depends(windows_sdk_dir, 'WINDOWSSDKDIR', use_windows_sdk)
- @checking('for Universal CRT SDK', valid_ucrt_sdk_dir_result)
- @imports('os')
- @imports(_from='__builtin__', _import='sorted')
- @imports(_import='mozpack.path', _as='mozpath')
+-@depends(windows_sdk_dir, "WINDOWSSDKDIR", c_compiler)
++@depends(windows_sdk_dir, "WINDOWSSDKDIR", c_compiler, host_c_compiler)
+ @checking("for Universal CRT SDK", valid_ucrt_sdk_dir_result)
+ @imports("os")
+ @imports(_from="__builtin__", _import="sorted")
+ @imports(_import="mozpack.path", _as="mozpath")
 -def valid_ucrt_sdk_dir(windows_sdk_dir, windows_sdk_dir_env, compiler):
-+def valid_ucrt_sdk_dir(windows_sdk_dir, windows_sdk_dir_env, use_windows_sdk):
++def valid_ucrt_sdk_dir(windows_sdk_dir, windows_sdk_dir_env, compiler, host_compiler):
      # Ideally, we'd actually check for host/target ABI being MSVC, but
      # that's waiting for bug 1617793.
--    if compiler.type != 'clang-cl':
-+    if not use_windows_sdk:
+-    if compiler.type != "clang-cl":
++    if compiler.type != 'clang-cl' and host_compiler.type != 'clang-cl':
          return None
      if windows_sdk_dir_env:
          windows_sdk_dir_env = windows_sdk_dir_env[0]
      sdks = {}
      for d in windows_sdk_dir:
-         sdk = get_sdk_dirs(d, 'ucrt')
+         sdk = get_sdk_dirs(d, "ucrt")
          if sdk:
              version = os.path.basename(sdk.include)
-@@ -241,20 +253,20 @@ def valid_ucrt_sdk_dir(windows_sdk_dir, 
+@@ -273,24 +285,20 @@ def valid_ucrt_sdk_dir(windows_sdk_dir, 
      return namespace(
          path=sdk.path,
          include=sdk.include,
@@ -134,74 +118,105 @@ diff --git a/build/moz.configure/windows.configure b/build/moz.configure/windows
  
  
 -@depends(c_compiler, host_c_compiler, toolchain_search_path)
-+@depends(use_windows_sdk, toolchain_search_path)
- @imports('os')
+-@imports("os")
 -def vc_path(c_compiler, host_c_compiler, toolchain_search_path):
--    if c_compiler.type != 'clang-cl' and host_c_compiler.type != 'clang-cl':
-+def vc_path(use_windows_sdk, toolchain_search_path):
-+    if not use_windows_sdk:
-         return
- 
+-    if c_compiler.type != "clang-cl" and host_c_compiler.type != "clang-cl":
+-        return
+-
++@imports('os')
++def vc_path_for_host_or_target(host_or_target_toolchain_search_path):
      # In clang-cl builds, we need the headers and libraries from an MSVC installation.
-     vc_program = find_program('cl.exe', paths=toolchain_search_path)
+-    vc_program = find_program("cl.exe", paths=toolchain_search_path)
++    vc_program = find_program("cl.exe", paths=host_or_target_toolchain_search_path)
      if not vc_program:
-         die('Cannot find a Visual C++ install for e.g. ATL headers.')
+         die("Cannot find a Visual C++ install for e.g. ATL headers.")
  
      result = os.path.dirname(vc_program)
-@@ -296,17 +308,16 @@ def dia_sdk_dir(vc_path, dia_sdk_path):
- @imports('os')
- def include_path(vc_path, windows_sdk_dir, ucrt_sdk_dir, dia_sdk_dir):
-     if not vc_path:
-         return
-     atlmfc_dir = os.path.join(vc_path, 'atlmfc', 'include')
-     if not os.path.isdir(atlmfc_dir):
-         die('Cannot find the ATL/MFC headers in the Visual C++ directory (%s). '
-             'Please install them.' % vc_path)
--
-     winrt_dir = os.path.join(windows_sdk_dir.include, 'winrt')
-     if not os.path.isdir(winrt_dir):
-         die('Cannot find the WinRT headers in the Windows SDK directory (%s). '
-             'Please install them.' % windows_sdk_dir.path)
+     while True:
+         next, p = os.path.split(result)
+         if next == result:
+             die(
+@@ -298,16 +306,24 @@ def vc_path(c_compiler, host_c_compiler,
+                 "is in" % vc_program
+             )
+         result = next
+         if p.lower() == "bin":
+             break
+     return os.path.normpath(result)
  
-     includes = []
-     include_env = os.environ.get('INCLUDE')
-     if include_env:
-@@ -362,16 +373,18 @@ set_config('WIN_DIA_SDK_BIN_DIR', dia_sd
- @template
- def lib_path_for(host_or_target):
-     @depends(host_or_target, dependable(host_or_target is host), vc_path,
-              valid_windows_sdk_dir, valid_ucrt_sdk_dir, dia_sdk_subdir(host_or_target, 'lib'))
-     @imports('os')
-     def lib_path(target, is_host, vc_path, windows_sdk_dir, ucrt_sdk_dir, dia_sdk_lib_dir):
+ 
++@depends(c_compiler, host_c_compiler, toolchain_search_path, host_toolchain_search_path)
++def vc_path(c_compiler, host_c_compiler, toolchain_search_path, host_toolchain_search_path):
++    if c_compiler.type == "clang-cl":
++        return vc_path_for_host_or_target(toolchain_search_path)
++    if host_c_compiler.type == "clang-cl":
++        return vc_path_for_host_or_target(host_toolchain_search_path)
++
++
+ option(env="DIA_SDK_PATH", nargs=1, help="Path to the Debug Interface Access SDK")
+ 
+ 
+ @depends(vc_path, "DIA_SDK_PATH")
+ @checking("for the Debug Interface Access SDK", lambda x: x or "not found")
+ @imports("os")
+ def dia_sdk_dir(vc_path, dia_sdk_path):
+     if dia_sdk_path:
+@@ -410,16 +426,18 @@ def lib_path_for(host_or_target):
+         dia_sdk_subdir(host_or_target, "lib"),
+     )
+     @imports("os")
+     def lib_path(
+         target, is_host, vc_path, windows_sdk_dir, ucrt_sdk_dir, dia_sdk_lib_dir
+     ):
          if not vc_path:
              return
 +        if target.kernel != 'WINNT':
 +            return
          sdk_target = {
-             'x86': 'x86',
-             'x86_64': 'x64',
-             'arm': 'arm',
-             'aarch64': 'arm64',
+             "x86": "x86",
+             "x86_64": "x64",
+             "arm": "arm",
+             "aarch64": "arm64",
          }.get(target.cpu)
  
          # MSVC2017 switched to use the same target naming as the sdk.
+diff --git a/security/nss/lib/freebl/freebl.gyp b/security/nss/lib/freebl/freebl.gyp
+--- a/security/nss/lib/freebl/freebl.gyp
++++ b/security/nss/lib/freebl/freebl.gyp
+@@ -735,16 +735,16 @@
+   'variables': {
+     'module': 'nss',
+     'conditions': [
+       [ 'target_arch=="x64" or target_arch=="arm64" or target_arch=="aarch64"', {
+         'have_int128_support%': 1,
+       }, {
+         'have_int128_support%': 0,
+       }],
+-      [ 'target_arch=="arm"', {
++      [ 'target_arch=="arm" and OS!="android"', {
+         # When the compiler uses the softfloat ABI, we want to use the compatible softfp ABI when enabling NEON for these objects.
+         # Confusingly, __SOFTFP__ is the name of the define for the softfloat ABI, not for the softfp ABI.
+         'softfp_cflags': '<!(${CC:-cc} -o - -E -dM - ${CFLAGS} < /dev/null | grep __SOFTFP__ > /dev/null && echo -mfloat-abi=softfp || true)',
+       }],
+     ],
+   }
+ }
 diff --git a/testing/mochitest/mochitest_options.py b/testing/mochitest/mochitest_options.py
 --- a/testing/mochitest/mochitest_options.py
 +++ b/testing/mochitest/mochitest_options.py
-@@ -969,21 +969,17 @@ class AndroidArguments(ArgumentContainer
-             objdir_xpi_stage = os.path.join(build_obj.distdir, 'xpi-stage')
+@@ -1262,20 +1262,17 @@ class AndroidArguments(ArgumentContainer
+             objdir_xpi_stage = os.path.join(build_obj.distdir, "xpi-stage")
              if os.path.isdir(objdir_xpi_stage):
                  options.extensionsToInstall = [
-                     os.path.join(objdir_xpi_stage, 'mochijar'),
-                     os.path.join(objdir_xpi_stage, 'specialpowers'),
+                     os.path.join(objdir_xpi_stage, "mochijar"),
+                     os.path.join(objdir_xpi_stage, "specialpowers"),
                  ]
  
          if options.remoteWebServer is None:
 -            if os.name != "nt":
 -                options.remoteWebServer = moznetwork.get_ip()
 -            else:
--                parser.error(
--                    "you must specify a --remote-webserver=<ip address>")
+-                parser.error("you must specify a --remote-webserver=<ip address>")
 +            options.remoteWebServer = moznetwork.get_ip()
  
          options.webServer = options.remoteWebServer
@@ -209,19 +224,19 @@ diff --git a/testing/mochitest/mochitest_options.py b/testing/mochitest/mochites
          if options.app is None:
              options.app = "org.mozilla.geckoview.test"
  
-         if build_obj and 'MOZ_HOST_BIN' in os.environ:
-             options.xrePath = os.environ['MOZ_HOST_BIN']
+         if build_obj and "MOZ_HOST_BIN" in os.environ:
+             options.xrePath = os.environ["MOZ_HOST_BIN"]
 diff --git a/testing/mochitest/runjunit.py b/testing/mochitest/runjunit.py
 --- a/testing/mochitest/runjunit.py
 +++ b/testing/mochitest/runjunit.py
-@@ -88,20 +88,17 @@ class JUnitTestRunner(MochitestDesktop):
-            Additional initialization required to satisfy MochitestDesktop.startServers
+@@ -102,20 +102,17 @@ class JUnitTestRunner(MochitestDesktop):
+         Additional initialization required to satisfy MochitestDesktop.startServers
          """
          self._locations = None
          self.server = None
          self.wsserver = None
          self.websocketProcessBridge = None
-         self.SERVER_STARTUP_TIMEOUT = 180 if mozinfo.info.get('debug') else 90
+         self.SERVER_STARTUP_TIMEOUT = 180 if mozinfo.info.get("debug") else 90
          if self.options.remoteWebServer is None:
 -            if os.name != "nt":
 -                self.options.remoteWebServer = moznetwork.get_ip()
@@ -229,26 +244,26 @@ diff --git a/testing/mochitest/runjunit.py b/testing/mochitest/runjunit.py
 -                raise UserError("--remote-webserver must be specified")
 +            self.options.remoteWebServer = moznetwork.get_ip()
          self.options.webServer = self.options.remoteWebServer
-         self.options.webSocketPort = '9988'
+         self.options.webSocketPort = "9988"
          self.options.httpdPath = None
          self.options.keep_open = False
          self.options.pidFile = ""
          self.options.subsuite = None
          self.options.xrePath = None
-         if build_obj and 'MOZ_HOST_BIN' in os.environ:
+         if build_obj and "MOZ_HOST_BIN" in os.environ:
 diff --git a/testing/mozbase/mozdevice/mozdevice/adb.py b/testing/mozbase/mozdevice/mozdevice/adb.py
 --- a/testing/mozbase/mozdevice/mozdevice/adb.py
 +++ b/testing/mozbase/mozdevice/mozdevice/adb.py
-@@ -31,17 +31,18 @@ class ADBProcess(object):
-     """ADBProcess encapsulates the data related to executing the adb process.
-     """
+@@ -30,17 +30,18 @@ from . import version_codes
+ class ADBProcess(object):
+     """ADBProcess encapsulates the data related to executing the adb process."""
  
      def __init__(self, args):
          #: command argument list.
          self.args = args
  
          #: Temporary file handle to be used for stdout.
--        self.stdout_file = tempfile.NamedTemporaryFile(mode='w+b')
+-        self.stdout_file = tempfile.NamedTemporaryFile(mode="w+b")
 +        #: delete=False is required on Windows's python. (Maybe leak)
 +        self.stdout_file = tempfile.NamedTemporaryFile(mode='w+b', delete=False)
  
@@ -259,10 +274,10 @@ diff --git a/testing/mozbase/mozdevice/mozdevice/adb.py b/testing/mozbase/mozdev
          self.exitcode = None
  
          #: subprocess Process object used to execute the command.
-@@ -337,16 +338,17 @@ class ADBCommand(object):
-                                     adb_process.timedout,
-                                     adb_process.exitcode,
-                                     output))
+@@ -356,16 +357,17 @@ class ADBCommand(object):
+                         output,
+                     )
+                 )
  
              return output
          finally:
@@ -297,18 +312,18 @@ diff --git a/testing/mozbase/moznetwork/moznetwork/moznetwork.py b/testing/mozba
  
  
  def _get_logger():
-     logger = mozlog.get_default_logger(component='moznetwork')
+     logger = mozlog.get_default_logger(component="moznetwork")
      if not logger:
-@@ -104,16 +106,31 @@ def _parse_ifconfig():
-     addrs = _proc_matches(['ifconfig'],
-                           r'inet (\d+.\d+.\d+.\d+)')
+@@ -114,16 +116,31 @@ def _parse_ifconfig():
+     # failed.
+     addrs = _proc_matches(["ifconfig"], r"inet (\d+.\d+.\d+.\d+)")
      try:
-         return [addr for addr in addrs if not addr.startswith('127.')][0]
+         return [addr for addr in addrs if not addr.startswith("127.")][0]
      except IndexError:
          return None
  
  
-+def _parse_winnet():
++def _parse_powershell():
 +    logger = _get_logger()
 +    logger.debug('Parsing GetNetIPAdress using PowerShell')
 +
@@ -325,28 +340,70 @@ diff --git a/testing/mozbase/moznetwork/moznetwork/moznetwork.py b/testing/mozba
 +
  def get_ip():
      """Provides an available network interface address, for example
-        "192.168.1.3".
+     "192.168.1.3".
  
-        A `NetworkError` exception is raised in case of failure."""
+     A `NetworkError` exception is raised in case of failure."""
      logger = _get_logger()
      try:
          hostname = socket.gethostname()
-@@ -143,16 +160,18 @@ def get_ip():
+@@ -133,18 +150,17 @@ def get_ip():
+         except socket.gaierror:  # for Mac OS X
+             hostname += ".local"
+             logger.debug("Retrieving IP for %s" % hostname)
+             ips = socket.gethostbyname_ex(hostname)[2]
+         if len(ips) == 1:
+             ip = ips[0]
+         elif len(ips) > 1:
+             logger.debug("Multiple addresses found: %s" % ips)
+-            # no fallback on Windows so take the first address
+-            ip = ips[0] if mozinfo.isWin else None
++            ip = None
+         else:
+             ip = None
+     except socket.gaierror:
+         # sometimes the hostname doesn't resolve to an ip address, in which
+         # case this will always fail
+         ip = None
+ 
+     if ip is None or ip.startswith("127."):
+@@ -153,16 +169,18 @@ def get_ip():
              for ifconfig in interfaces:
-                 logger.debug('Interface: [%s] %s' % (ifconfig[0], ifconfig[1]))
-                 if ifconfig[0] == 'lo':
+                 logger.debug("Interface: [%s] %s" % (ifconfig[0], ifconfig[1]))
+                 if ifconfig[0] == "lo":
                      continue
                  else:
                      return ifconfig[1]
          elif mozinfo.isMac:
              ip = _parse_ifconfig()
 +        elif mozinfo.isWin:
-+            ip = _parse_winnet()
++            ip = _parse_powershell()
  
      if ip is None:
-         raise NetworkError('Unable to obtain network address')
+         raise NetworkError("Unable to obtain network address")
  
      return ip
  
  
  def get_lan_ip():
+diff --git a/third_party/python/gyp/pylib/gyp/input.py b/third_party/python/gyp/pylib/gyp/input.py
+--- a/third_party/python/gyp/pylib/gyp/input.py
++++ b/third_party/python/gyp/pylib/gyp/input.py
+@@ -916,17 +916,17 @@ def ExpandVariables(input, phase, variab
+                                  cwd=build_file_dir)
+           except Exception as e:
+             raise GypError("%s while executing command '%s' in %s" %
+                            (e, contents, build_file))
+ 
+           p_stdout, p_stderr = p.communicate('')
+ 
+           if p.wait() != 0 or p_stderr:
+-            p_stderr_decoded = p_stderr.decode('utf-8')
++            p_stderr_decoded = p_stderr.decode('mbcs')
+             sys.stderr.write(p_stderr_decoded)
+             # Simulate check_call behavior, since check_call only exists
+             # in python 2.5 and later.
+             raise GypError("Call to '%s' returned exit status %d while in %s." %
+                            (contents, p.returncode, build_file))
+           replacement = p_stdout.decode('utf-8').rstrip()
+ 
+         cached_command_results[cache_key] = replacement
